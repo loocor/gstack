@@ -1,26 +1,86 @@
+// @ts-nocheck -- Bun test file; repo does not configure editor typings for Bun/Node built-ins.
 import { describe, test, expect } from 'bun:test';
 import { COMMAND_DESCRIPTIONS } from '../browse/src/commands';
 import { SNAPSHOT_FLAGS } from '../browse/src/snapshot';
+import {
+  GENERATED_HOSTS,
+  GENERATION_ALIASES,
+  HOSTS,
+  LAYOUTS,
+  RUNTIME_SIDECAR_ASSETS,
+  codexSkillName,
+  generatedHostLabel,
+  resolveGenerationTarget,
+} from '../scripts/host-registry';
 import * as fs from 'fs';
 import * as path from 'path';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 
-// Dynamic template discovery — matches the generator's findTemplates() behavior.
-// New skills automatically get test coverage without updating a static list.
-const ALL_SKILLS = (() => {
-  const skills: Array<{ dir: string; name: string }> = [];
-  if (fs.existsSync(path.join(ROOT, 'SKILL.md.tmpl'))) {
-    skills.push({ dir: '.', name: 'root gstack' });
-  }
+function sliceSection(content: string, startMarker: string, endMarker: string): string {
+  return content.slice(content.indexOf(startMarker), content.indexOf(endMarker));
+}
+
+function findTemplateSkillDirs(): string[] {
+  const dirs: string[] = [];
+  if (fs.existsSync(path.join(ROOT, 'SKILL.md.tmpl'))) dirs.push('');
   for (const entry of fs.readdirSync(ROOT, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-    if (fs.existsSync(path.join(ROOT, entry.name, 'SKILL.md.tmpl'))) {
-      skills.push({ dir: entry.name, name: entry.name });
-    }
+    if (fs.existsSync(path.join(ROOT, entry.name, 'SKILL.md.tmpl'))) dirs.push(entry.name);
   }
-  return skills;
-})();
+  return dirs;
+}
+
+const ALL_SKILLS = findTemplateSkillDirs().map(dir => ({
+  dir: dir === '' ? '.' : dir,
+  name: dir === '' ? 'root gstack' : dir,
+}));
+const AGENTS_DIR = path.join(ROOT, '.agents', 'skills');
+const AGENTS_LAYOUT = LAYOUTS[HOSTS.codex.layoutId];
+
+describe('host registry contract', () => {
+  test('maps Claude, Codex, and Gemini to the expected layouts', () => {
+    expect(HOSTS.claude.layoutId).toBe('claude');
+    expect(HOSTS.codex.layoutId).toBe('agents');
+    expect(HOSTS.gemini.layoutId).toBe('agents');
+  });
+
+  test('keeps agents runtime roots separate from discoverable skills', () => {
+    expect(HOSTS.codex.runtimeRoot).toBe(AGENTS_LAYOUT.paths.sharedRuntimeRoot);
+    expect(HOSTS.gemini.runtimeRoot).toBe(AGENTS_LAYOUT.paths.sharedRuntimeRoot);
+
+    expect(HOSTS.codex.runtimeAssetSidecarRoot).toBe(AGENTS_LAYOUT.paths.workspaceRuntimeRoot);
+    expect(HOSTS.gemini.runtimeAssetSidecarRoot).toBe(AGENTS_LAYOUT.paths.workspaceRuntimeRoot);
+
+    expect(HOSTS.codex.discoverableSkillEntries).toContain('.agents/skills/gstack');
+    expect(HOSTS.codex.discoverableSkillEntries).toContain('.agents/skills/gstack-*');
+    expect(HOSTS.gemini.discoverableSkillEntries).toContain('.agents/skills/gstack');
+    expect(HOSTS.gemini.discoverableSkillEntries).toContain('.agents/skills/gstack-*');
+    expect(HOSTS.codex.discoverableSkillEntries).not.toContain('.gstack');
+    expect(HOSTS.gemini.discoverableSkillEntries).not.toContain('.gstack');
+  });
+
+  test('shares the same runtime sidecar assets across agents hosts', () => {
+    expect(HOSTS.codex.runtimeSidecarAssets).toEqual([...RUNTIME_SIDECAR_ASSETS]);
+    expect(HOSTS.gemini.runtimeSidecarAssets).toEqual([...RUNTIME_SIDECAR_ASSETS]);
+    expect(HOSTS.gemini.supportedInstallModes).toEqual(['workspace']);
+    expect(HOSTS.gemini.discoveryMode).toBe('workspace-sidecar');
+  });
+
+  test('gemini host arg resolves to the agents generation target', () => {
+    expect(GENERATION_ALIASES.gemini).toBe('codex');
+    const target = resolveGenerationTarget('gemini');
+    expect(target.hostId).toBe('codex');
+    expect(target.layoutId).toBe('agents');
+  });
+
+  test('uses contract-driven output paths for Claude and agents layouts', () => {
+    expect(LAYOUTS.claude.outputPath(ROOT, '')).toBe(path.join(ROOT, 'SKILL.md'));
+    expect(LAYOUTS.claude.outputPath(ROOT, 'review')).toBe(path.join(ROOT, 'review', 'SKILL.md'));
+    expect(AGENTS_LAYOUT.outputPath(ROOT, '')).toBe(path.join(ROOT, '.agents', 'skills', 'gstack', 'SKILL.md'));
+    expect(AGENTS_LAYOUT.outputPath(ROOT, 'review')).toBe(path.join(ROOT, '.agents', 'skills', 'gstack-review', 'SKILL.md'));
+  });
+});
 
 describe('gen-skill-docs', () => {
   test('generated SKILL.md contains all command categories', () => {
@@ -98,21 +158,37 @@ describe('gen-skill-docs', () => {
     }
   });
 
-  test('generated files are fresh (match --dry-run)', () => {
-    const result = Bun.spawnSync(['bun', 'run', 'scripts/gen-skill-docs.ts', '--dry-run'], {
-      cwd: ROOT,
-      stdout: 'pipe',
-      stderr: 'pipe',
+  for (const hostId of GENERATED_HOSTS) {
+    test(`${generatedHostLabel(hostId)} generated files are fresh (match --dry-run)`, () => {
+      const args = ['bun', 'run', 'scripts/gen-skill-docs.ts'];
+      if (hostId !== 'claude') args.push('--host', hostId);
+      args.push('--dry-run');
+
+      const result = Bun.spawnSync(args, {
+        cwd: ROOT,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      expect(result.exitCode).toBe(0);
+      const output = result.stdout.toString();
+
+      if (hostId === 'claude') {
+        for (const skill of ALL_SKILLS) {
+          const file = skill.dir === '.' ? 'SKILL.md' : `${skill.dir}/SKILL.md`;
+          expect(output).toContain(`FRESH: ${file}`);
+        }
+      } else {
+        const expectedSkills = findTemplateSkillDirs()
+          .filter(dir => !AGENTS_LAYOUT.excludedSkills.includes(dir))
+          .map(dir => `.agents/skills/${codexSkillName(dir)}/SKILL.md`);
+        for (const file of expectedSkills) {
+          expect(output).toContain(`FRESH: ${file}`);
+        }
+      }
+
+      expect(output).not.toContain('STALE');
     });
-    expect(result.exitCode).toBe(0);
-    const output = result.stdout.toString();
-    // Every skill should be FRESH
-    for (const skill of ALL_SKILLS) {
-      const file = skill.dir === '.' ? 'SKILL.md' : `${skill.dir}/SKILL.md`;
-      expect(output).toContain(`FRESH: ${file}`);
-    }
-    expect(output).not.toContain('STALE');
-  });
+  }
 
   test('no generated SKILL.md contains unresolved placeholders', () => {
     for (const skill of ALL_SKILLS) {
@@ -535,23 +611,9 @@ describe('BENEFITS_FROM resolver', () => {
 // ─── Codex Generation Tests ─────────────────────────────────
 
 describe('Codex generation (--host codex)', () => {
-  const AGENTS_DIR = path.join(ROOT, '.agents', 'skills');
-
-  // Dynamic discovery of expected Codex skills: all templates except /codex
-  const CODEX_SKILLS = (() => {
-    const skills: Array<{ dir: string; codexName: string }> = [];
-    if (fs.existsSync(path.join(ROOT, 'SKILL.md.tmpl'))) {
-      skills.push({ dir: '.', codexName: 'gstack' });
-    }
-    for (const entry of fs.readdirSync(ROOT, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-      if (entry.name === 'codex') continue; // /codex is excluded from Codex output
-      if (!fs.existsSync(path.join(ROOT, entry.name, 'SKILL.md.tmpl'))) continue;
-      const codexName = entry.name.startsWith('gstack-') ? entry.name : `gstack-${entry.name}`;
-      skills.push({ dir: entry.name, codexName });
-    }
-    return skills;
-  })();
+  const CODEX_SKILLS = findTemplateSkillDirs()
+    .filter(dir => !AGENTS_LAYOUT.excludedSkills.includes(dir))
+    .map(dir => ({ dir: dir === '' ? '.' : dir, codexName: codexSkillName(dir) }));
 
   test('--host codex generates correct output paths', () => {
     for (const skill of CODEX_SKILLS) {
@@ -683,70 +745,53 @@ describe('Codex generation (--host codex)', () => {
     }
   });
 
-  test('Codex preamble uses codex paths', () => {
-    // Check a skill that has a preamble (review is a good candidate)
+  test('Codex preamble uses shared runtime contract paths', () => {
     const content = fs.readFileSync(path.join(AGENTS_DIR, 'gstack-review', 'SKILL.md'), 'utf-8');
-    expect(content).toContain('~/.codex/skills/gstack');
-    expect(content).toContain('.agents/skills/gstack');
+    expect(content).toContain(AGENTS_LAYOUT.paths.sharedRuntimeRoot);
+    expect(content).toContain(AGENTS_LAYOUT.paths.workspaceRuntimeRoot);
   });
 
   // ─── Path rewriting regression tests ─────────────────────────
 
-  test('sidecar paths point to .agents/skills/gstack/review/ (not gstack-review/)', () => {
-    // Regression: gen-skill-docs rewrote .claude/skills/review → .agents/skills/gstack-review
-    // but setup puts sidecars under .agents/skills/gstack/review/. Must match setup layout.
+  test('shared runtime review paths point to ~/.gstack/review/ (not skill entries)', () => {
     const content = fs.readFileSync(path.join(AGENTS_DIR, 'gstack-review', 'SKILL.md'), 'utf-8');
-    // Correct: references to sidecar files use gstack/review/ path
-    expect(content).toContain('.agents/skills/gstack/review/checklist.md');
-    expect(content).toContain('.agents/skills/gstack/review/design-checklist.md');
-    // Wrong: must NOT reference gstack-review/checklist.md (file doesn't exist there)
+    expect(content).toContain('~/.gstack/review/checklist.md');
+    expect(content).toContain('~/.gstack/review/design-checklist.md');
     expect(content).not.toContain('.agents/skills/gstack-review/checklist.md');
-    expect(content).not.toContain('.agents/skills/gstack-review/design-checklist.md');
+    expect(content).not.toContain('.agents/skills/gstack/review/checklist.md');
   });
 
-  test('sidecar paths in ship skill point to gstack/review/ for pre-landing review', () => {
+  test('shared runtime review paths in ship skill point to ~/.gstack/review/', () => {
     const content = fs.readFileSync(path.join(AGENTS_DIR, 'gstack-ship', 'SKILL.md'), 'utf-8');
-    // Ship references the review checklist in its pre-landing review step
     if (content.includes('checklist.md')) {
-      expect(content).toContain('.agents/skills/gstack/review/');
+      expect(content).toContain('~/.gstack/review/');
       expect(content).not.toContain('.agents/skills/gstack-review/checklist');
     }
   });
 
-  test('greptile-triage sidecar path is correct', () => {
+  test('greptile-triage shared runtime path is correct', () => {
     const content = fs.readFileSync(path.join(AGENTS_DIR, 'gstack-review', 'SKILL.md'), 'utf-8');
     if (content.includes('greptile-triage')) {
-      expect(content).toContain('.agents/skills/gstack/review/greptile-triage.md');
+      expect(content).toContain('~/.gstack/review/greptile-triage.md');
       expect(content).not.toContain('.agents/skills/gstack-review/greptile-triage');
     }
   });
 
-  test('all four path rewrite rules produce correct output', () => {
-    // Test each of the 4 path rewrite rules individually
+  test('shared runtime path rewrite rules produce correct output', () => {
     const content = fs.readFileSync(path.join(AGENTS_DIR, 'gstack-review', 'SKILL.md'), 'utf-8');
 
-    // Rule 1: ~/.claude/skills/gstack → ~/.codex/skills/gstack
     expect(content).not.toContain('~/.claude/skills/gstack');
-    expect(content).toContain('~/.codex/skills/gstack');
-
-    // Rule 2: .claude/skills/gstack → .agents/skills/gstack
+    expect(content).toContain('~/.gstack');
     expect(content).not.toContain('.claude/skills/gstack');
-
-    // Rule 3: .claude/skills/review → .agents/skills/gstack/review
     expect(content).not.toContain('.claude/skills/review');
-
-    // Rule 4: .claude/skills → .agents/skills (catch-all)
     expect(content).not.toContain('.claude/skills');
   });
 
-  test('path rewrite rules apply to all Codex skills with sidecar references', () => {
-    // Verify across ALL generated skills, not just review
+  test('path rewrite rules apply to all Codex skills with shared runtime references', () => {
     for (const skill of CODEX_SKILLS) {
       const content = fs.readFileSync(path.join(AGENTS_DIR, skill.codexName, 'SKILL.md'), 'utf-8');
-      // No skill should reference Claude paths
       expect(content).not.toContain('~/.claude/skills');
       expect(content).not.toContain('.claude/skills');
-      // If a skill references checklist.md, it must use the correct sidecar path
       if (content.includes('checklist.md') && !content.includes('design-checklist.md')) {
         expect(content).not.toContain('gstack-review/checklist.md');
       }
@@ -755,24 +800,22 @@ describe('Codex generation (--host codex)', () => {
 
   // ─── Claude output regression guard ─────────────────────────
 
-  test('Claude output unchanged: review skill still uses .claude/skills/ paths', () => {
-    // Codex changes must NOT affect Claude output
+  test('Claude output now uses shared runtime paths, not agents paths', () => {
     const content = fs.readFileSync(path.join(ROOT, 'review', 'SKILL.md'), 'utf-8');
-    expect(content).toContain('.claude/skills/review/checklist.md');
-    expect(content).toContain('~/.claude/skills/gstack');
-    // Must NOT contain Codex paths
+    expect(content).toContain('~/.gstack/review/checklist.md');
+    expect(content).toContain('~/.gstack');
     expect(content).not.toContain('.agents/skills');
     expect(content).not.toContain('~/.codex/');
   });
 
-  test('Claude output unchanged: ship skill still uses .claude/skills/ paths', () => {
+  test('Claude output also uses shared runtime paths in ship skill', () => {
     const content = fs.readFileSync(path.join(ROOT, 'ship', 'SKILL.md'), 'utf-8');
-    expect(content).toContain('~/.claude/skills/gstack');
+    expect(content).toContain('~/.gstack');
     expect(content).not.toContain('.agents/skills');
     expect(content).not.toContain('~/.codex/');
   });
 
-  test('Claude output unchanged: all Claude skills have zero Codex paths', () => {
+  test('all Claude skills avoid host-specific paths from other runtimes', () => {
     for (const skill of ALL_SKILLS) {
       const content = fs.readFileSync(path.join(ROOT, skill.dir, 'SKILL.md'), 'utf-8');
       expect(content).not.toContain('~/.codex/');
@@ -789,6 +832,10 @@ describe('Codex generation (--host codex)', () => {
 describe('setup script validation', () => {
   const setupContent = fs.readFileSync(path.join(ROOT, 'setup'), 'utf-8');
 
+  function getSetupSection(startMarker: string, endMarker: string): string {
+    return sliceSection(setupContent, startMarker, endMarker);
+  }
+
   test('setup has separate link functions for Claude and Codex', () => {
     expect(setupContent).toContain('link_claude_skill_dirs');
     expect(setupContent).toContain('link_codex_skill_dirs');
@@ -796,21 +843,22 @@ describe('setup script validation', () => {
     expect(setupContent).not.toMatch(/^link_skill_dirs\(\)/m);
   });
 
-  test('Claude install uses link_claude_skill_dirs', () => {
-    // The Claude install section (section 4) should use the Claude function
-    const claudeSection = setupContent.slice(
-      setupContent.indexOf('# 4. Install for Claude'),
-      setupContent.indexOf('# 5. Install for Codex')
+  test('Claude install points the root skill entry at the shared runtime home', () => {
+    const claudeSection = getSetupSection(
+      '# 6. Install for Claude',
+      '# 7. Install for Codex'
     );
-    expect(claudeSection).toContain('link_claude_skill_dirs');
+    expect(claudeSection).toContain('CLAUDE_ROOT_SKILL="$CLAUDE_SKILLS/gstack"');
+    expect(claudeSection).toContain('ln -snf "$SHARED_RUNTIME_ROOT" "$CLAUDE_ROOT_SKILL"');
+    expect(claudeSection).toContain('link_claude_skill_dirs "$CLAUDE_ROOT_SKILL" "$CLAUDE_SKILLS"');
     expect(claudeSection).not.toContain('link_codex_skill_dirs');
   });
 
   test('Codex install uses link_codex_skill_dirs', () => {
     // The Codex install section (section 5) should use the Codex function
-    const codexSection = setupContent.slice(
-      setupContent.indexOf('# 5. Install for Codex'),
-      setupContent.indexOf('# 6. Create')
+    const codexSection = getSetupSection(
+      '# 7. Install for Codex',
+      '# 8. Workspace runtime sidecar'
     );
     expect(codexSection).toContain('link_codex_skill_dirs');
     expect(codexSection).not.toContain('link_claude_skill_dirs');
@@ -822,7 +870,8 @@ describe('setup script validation', () => {
     const fnEnd = setupContent.indexOf('}', setupContent.indexOf('linked[@]}', fnStart));
     const fnBody = setupContent.slice(fnStart, fnEnd);
     expect(fnBody).toContain('.agents/skills');
-    expect(fnBody).toContain('gstack*');
+    expect(fnBody).toContain('gstack-*');
+    expect(fnBody).not.toContain('for skill_dir in "$agents_dir"/*/');
   });
 
   test('link_claude_skill_dirs creates relative symlinks', () => {
@@ -833,25 +882,121 @@ describe('setup script validation', () => {
     expect(fnBody).toContain('ln -snf "gstack/$skill_name"');
   });
 
-  test('setup supports --host auto|claude|codex', () => {
+  test('setup supports --host auto|claude|codex|gemini', () => {
     expect(setupContent).toContain('--host');
-    expect(setupContent).toContain('claude|codex|auto');
+    expect(setupContent).toContain('claude|codex|gemini|auto');
   });
 
-  test('auto mode detects claude and codex binaries', () => {
+  test('auto mode detects claude, codex, and gemini binaries', () => {
     expect(setupContent).toContain('command -v claude');
     expect(setupContent).toContain('command -v codex');
+    expect(setupContent).toContain('command -v gemini');
   });
 
-  test('create_agents_sidecar links runtime assets', () => {
-    // Sidecar must link bin, browse, review, qa
-    const fnStart = setupContent.indexOf('create_agents_sidecar()');
-    const fnEnd = setupContent.indexOf('}', setupContent.indexOf('done', fnStart));
+  test('auto mode fails explicitly when no supported host binaries are detected', () => {
+    expect(setupContent).toContain('gstack setup failed: --host auto could not detect claude, codex, or gemini on PATH');
+    expect(setupContent).not.toContain('default to claude');
+  });
+
+  test('materialize_runtime_assets materializes a self-contained runtime home', () => {
+    const fnStart = setupContent.indexOf('materialize_runtime_assets()');
+    const fnEnd = setupContent.indexOf('}', setupContent.indexOf('cleanup_legacy_agents_runtime "$runtime_root"', fnStart));
     const fnBody = setupContent.slice(fnStart, fnEnd);
-    expect(fnBody).toContain('bin');
-    expect(fnBody).toContain('browse');
-    expect(fnBody).toContain('review');
-    expect(fnBody).toContain('qa');
+    expect(setupContent).toContain('materialize_runtime_entry()');
+    expect(fnBody).toContain('runtime_root');
+    expect(fnBody).toContain('materialize_runtime_entry "$src" "$dst"');
+    expect(fnBody).toContain('materialize_runtime_entry "$skill_dir" "$runtime_root/$skill_name"');
+    expect(fnBody).toContain('cleanup_legacy_agents_runtime "$runtime_root"');
+    expect(setupContent).toContain('RUNTIME_ASSETS="bin browse .agents ETHOS.md VERSION CHANGELOG.md SKILL.md SKILL.md.tmpl package.json scripts setup supabase"');
+  });
+
+  test('materialize_runtime_entry skips self-overwrite when setup runs from the runtime home', () => {
+    const fnStart = setupContent.indexOf('materialize_runtime_entry()');
+    const fnEnd = setupContent.indexOf('}', setupContent.indexOf('cp -R "$src" "$dst"', fnStart));
+    const fnBody = setupContent.slice(fnStart, fnEnd);
+    expect(fnBody).toContain('if [ "$resolved_src" = "$resolved_dst" ]; then');
+    expect(fnBody).toContain('return 0');
+  });
+
+  test('setup does not create a nested workspace runtime when run from ~/.gstack', () => {
+    const rootFnStart = setupContent.indexOf('resolve_workspace_repo_root()');
+    const rootFnEnd = setupContent.indexOf('WORKSPACE_REPO_ROOT=""', rootFnStart);
+    const rootFnBody = setupContent.slice(rootFnStart, rootFnEnd);
+    expect(setupContent).toContain('SHARED_RUNTIME_ROOT_REAL="$(cd "$SHARED_RUNTIME_ROOT" && pwd -P)"');
+    expect(rootFnBody).toContain('if [ "$GSTACK_DIR" = "$SHARED_RUNTIME_ROOT_REAL" ]; then');
+    expect(rootFnBody).toContain('return 1');
+  });
+
+  test('setup validates the packaged browse binary before reusing it', () => {
+    expect(setupContent).toContain('elif ! "$BROWSE_BIN" --help >/dev/null 2>&1; then');
+    expect(setupContent).toContain('NEEDS_BUILD=1');
+  });
+
+  test('Codex install keeps root skill entry separate from discoverable skills', () => {
+    const codexSection = getSetupSection(
+      '# 7. Install for Codex',
+      '# 8. Workspace runtime sidecar'
+    );
+    expect(codexSection).toContain('CODEX_ROOT_SKILL="$CODEX_SKILLS/gstack"');
+    expect(codexSection).toContain('ln -snf "$SHARED_RUNTIME_ROOT/.agents/skills/gstack" "$CODEX_ROOT_SKILL"');
+    expect(codexSection).toContain('link_codex_skill_dirs "$SHARED_RUNTIME_ROOT" "$CODEX_SKILLS"');
+    expect(codexSection).not.toContain('gstack-gstack');
+  });
+
+  test('Codex install migrates legacy real-directory root installs', () => {
+    const codexSection = getSetupSection(
+      '# 7. Install for Codex',
+      '# 8. Workspace runtime sidecar'
+    );
+    expect(codexSection).toContain('Migrate legacy real-directory installs');
+    expect(codexSection).toContain('rm -rf "$CODEX_ROOT_SKILL"');
+    expect(codexSection).toContain('"$CODEX_ROOT_SKILL/bin"');
+  });
+
+  test('workspace runtime sidecar remains available for agents hosts when setup runs inside a repo', () => {
+    const sidecarSection = getSetupSection(
+      '# 8. Workspace runtime sidecar is available for any agents host',
+      '# 9. First-time welcome'
+    );
+    expect(sidecarSection).toContain('INSTALL_AGENTS_SIDECAR');
+    expect(sidecarSection).not.toContain('if [ "$INSTALL_CODEX" -eq 1 ]');
+    expect(sidecarSection).toContain('[ -n "$WORKSPACE_RUNTIME_ROOT" ]');
+    expect(setupContent).toContain('gstack ready (gemini).');
+    expect(setupContent).toContain('if [ -n "$WORKSPACE_RUNTIME_ROOT" ]; then');
+    expect(setupContent).toContain('GEMINI_SKIPPED_NO_REPO=1');
+    expect(setupContent).not.toContain('cleanup_legacy_agents_runtime "$WORKSPACE_REPO_ROOT"');
+  });
+
+  test('gemini install fails clearly when setup is not running inside a repo', () => {
+    expect(setupContent).toContain('gstack setup failed: Gemini workspace install requires running inside a repo');
+    expect(setupContent).toContain('Re-run from the target repo so setup can materialize .gstack for Gemini discovery.');
+    expect(setupContent).toContain('gemini workspace sidecar not materialized because setup is not running inside a repo');
+  });
+
+  test('workspace runtime root is materialized only when setup can resolve a repo root', () => {
+    const rootSection = getSetupSection(
+      '# 4. Resolve repo/runtime roots',
+      '# 5. Materialize shared runtime + workspace fallback'
+    );
+    expect(rootSection).toContain('resolve_workspace_repo_root()');
+    expect(rootSection).toContain('git -C "$candidate_root" rev-parse --show-toplevel');
+    expect(rootSection).toContain('WORKSPACE_RUNTIME_ROOT=""');
+    expect(rootSection).toContain('if WORKSPACE_REPO_ROOT="$(resolve_workspace_repo_root)"; then');
+  });
+
+  test('skill-check treats shared/workspace runtime homes as install-time state, not generated artifact freshness', () => {
+    const skillCheckContent = fs.readFileSync(path.join(ROOT, 'scripts', 'skill-check.ts'), 'utf-8');
+    expect(skillCheckContent).toContain('shared runtime home');
+    expect(skillCheckContent).toContain('workspace runtime home');
+    expect(skillCheckContent).toContain('run: ./setup --host codex');
+    expect(skillCheckContent).not.toContain('ERROR gstack                         - runtime sidecar missing assets');
+  });
+
+  test('bin/gstack resolves symlinks before locating setup', () => {
+    const binContent = fs.readFileSync(path.join(ROOT, 'bin', 'gstack'), 'utf-8');
+    expect(binContent).toContain('while [ -L "$SCRIPT_PATH" ]; do');
+    expect(binContent).toContain('LINK_TARGET="$(readlink "$SCRIPT_PATH")"');
+    expect(binContent).toContain('ROOT="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd -P)"');
   });
 });
 

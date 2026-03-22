@@ -6,6 +6,7 @@
  * dependencies were modified. Override with EVALS_ALL=1 to run everything.
  */
 
+// @ts-nocheck -- Helper runs under Bun, but repo does not configure editor typings for Node built-ins.
 import { spawnSync } from 'child_process';
 
 // --- Glob matching ---
@@ -184,6 +185,8 @@ export const GLOBAL_TOUCHFILES = [
   'test/helpers/eval-store.ts',
   'test/helpers/llm-judge.ts',
   'scripts/gen-skill-docs.ts',
+  'scripts/host-registry.ts',
+  'setup',
   'test/helpers/touchfiles.ts',
   'browse/test/test-server.ts',
 ];

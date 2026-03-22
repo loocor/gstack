@@ -1,23 +1,30 @@
 #!/usr/bin/env bash
-# gstack setup — build browser binary + register skills with Claude Code / Codex
+# gstack setup - build browser binary + register skills with Claude Code / Codex
 set -e
 
-if ! command -v bun >/dev/null 2>&1; then
-  echo "Error: bun is required but not installed." >&2
-  echo "Install it: curl -fsSL https://bun.sh/install | bash" >&2
-  exit 1
-fi
-
-GSTACK_DIR="$(cd "$(dirname "$0")" && pwd)"
+GSTACK_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 SKILLS_DIR="$(dirname "$GSTACK_DIR")"
+SKILLS_BASENAME="$(basename "$SKILLS_DIR")"
 BROWSE_BIN="$GSTACK_DIR/browse/dist/browse"
+SHARED_RUNTIME_ROOT="$HOME/.gstack"
+SETUP_MODE="${GSTACK_SETUP_MODE:-install}"
+case "$SETUP_MODE" in
+  install|dev) ;;
+  *) echo "Unknown GSTACK_SETUP_MODE: $SETUP_MODE (expected install or dev)" >&2; exit 1 ;;
+ esac
+HAS_BUN=0
+command -v bun >/dev/null 2>&1 && HAS_BUN=1
+FIRST_TIME_GSTACK=0
+if [ ! -d "$SHARED_RUNTIME_ROOT" ]; then
+  FIRST_TIME_GSTACK=1
+fi
 
 IS_WINDOWS=0
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT) IS_WINDOWS=1 ;;
 esac
 
-# ─── Parse --host flag ─────────────────────────────────────────
+# --- Parse --host flag -------------------------------------------------
 HOST="claude"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -28,28 +35,35 @@ while [ $# -gt 0 ]; do
 done
 
 case "$HOST" in
-  claude|codex|auto) ;;
-  *) echo "Unknown --host value: $HOST (expected claude, codex, or auto)" >&2; exit 1 ;;
+  claude|codex|gemini|auto) ;;
+  *) echo "Unknown --host value: $HOST (expected claude, codex, gemini, or auto)" >&2; exit 1 ;;
 esac
 
 # For auto: detect which agents are installed
 INSTALL_CLAUDE=0
 INSTALL_CODEX=0
+INSTALL_AGENTS_SIDECAR=0
+GEMINI_SKIPPED_NO_REPO=0
 if [ "$HOST" = "auto" ]; then
   command -v claude >/dev/null 2>&1 && INSTALL_CLAUDE=1
-  command -v codex >/dev/null 2>&1 && INSTALL_CODEX=1
-  # If neither found, default to claude
-  if [ "$INSTALL_CLAUDE" -eq 0 ] && [ "$INSTALL_CODEX" -eq 0 ]; then
-    INSTALL_CLAUDE=1
+  command -v codex >/dev/null 2>&1 && INSTALL_CODEX=1 && INSTALL_AGENTS_SIDECAR=1
+  command -v gemini >/dev/null 2>&1 && INSTALL_AGENTS_SIDECAR=1
+  if [ "$INSTALL_CLAUDE" -eq 0 ] && [ "$INSTALL_CODEX" -eq 0 ] && [ "$INSTALL_AGENTS_SIDECAR" -eq 0 ]; then
+    echo "gstack setup failed: --host auto could not detect claude, codex, or gemini on PATH" >&2
+    echo "  Re-run with --host claude, --host codex, or --host gemini after installing that host." >&2
+    exit 1
   fi
 elif [ "$HOST" = "claude" ]; then
   INSTALL_CLAUDE=1
 elif [ "$HOST" = "codex" ]; then
   INSTALL_CODEX=1
+  INSTALL_AGENTS_SIDECAR=1
+elif [ "$HOST" = "gemini" ]; then
+  INSTALL_AGENTS_SIDECAR=1
 fi
 
 ensure_playwright_browser() {
-  if [ "$IS_WINDOWS" -eq 1 ]; then
+  if [ "$IS_WINDOWS" -eq 1 ] || [ "$HAS_BUN" -ne 1 ]; then
     # On Windows, Bun can't launch Chromium due to broken pipe handling
     # (oven-sh/bun#4253). Use Node.js to verify Chromium works instead.
     (
@@ -64,7 +78,7 @@ ensure_playwright_browser() {
   fi
 }
 
-# 1. Build browse binary if needed (smart rebuild: stale sources, package.json, lock)
+# 1. Build browse binary if needed (smart rebuild: stale sources, package.json, lock, or wrong host binary)
 NEEDS_BUILD=0
 if [ ! -x "$BROWSE_BIN" ]; then
   NEEDS_BUILD=1
@@ -74,9 +88,16 @@ elif [ "$GSTACK_DIR/package.json" -nt "$BROWSE_BIN" ]; then
   NEEDS_BUILD=1
 elif [ -f "$GSTACK_DIR/bun.lock" ] && [ "$GSTACK_DIR/bun.lock" -nt "$BROWSE_BIN" ]; then
   NEEDS_BUILD=1
+elif ! "$BROWSE_BIN" --help >/dev/null 2>&1; then
+  NEEDS_BUILD=1
 fi
 
 if [ "$NEEDS_BUILD" -eq 1 ]; then
+  if [ "$HAS_BUN" -ne 1 ]; then
+    echo "gstack setup failed: bun is required to build runtime assets" >&2
+    echo "  Install it: curl -fsSL https://bun.sh/install | bash" >&2
+    exit 1
+  fi
   echo "Building browse binary..."
   (
     cd "$GSTACK_DIR"
@@ -99,18 +120,27 @@ if ! ensure_playwright_browser; then
   echo "Installing Playwright Chromium..."
   (
     cd "$GSTACK_DIR"
-    bunx playwright install chromium
+    if [ "$HAS_BUN" -eq 1 ]; then
+      bunx playwright install chromium
+    else
+      if ! command -v node >/dev/null 2>&1 || ! command -v npx >/dev/null 2>&1; then
+        echo "gstack setup failed: Node.js and npx are required to install Playwright Chromium when Bun is unavailable" >&2
+        echo "  Install Node.js: https://nodejs.org/" >&2
+        exit 1
+      fi
+      npx playwright install chromium
+    fi
   )
 
   if [ "$IS_WINDOWS" -eq 1 ]; then
-    # On Windows, Node.js launches Chromium (not Bun — see oven-sh/bun#4253).
+    # On Windows, Node.js launches Chromium (not Bun - see oven-sh/bun#4253).
     # Ensure playwright is importable by Node from the gstack directory.
     if ! command -v node >/dev/null 2>&1; then
       echo "gstack setup failed: Node.js is required on Windows (Bun cannot launch Chromium due to a pipe bug)" >&2
       echo "  Install Node.js: https://nodejs.org/" >&2
       exit 1
     fi
-    echo "Windows detected — verifying Node.js can load Playwright..."
+    echo "Windows detected - verifying Node.js can load Playwright..."
     (
       cd "$GSTACK_DIR"
       # Bun's node_modules already has playwright; verify Node can require it
@@ -131,9 +161,10 @@ if ! ensure_playwright_browser; then
 fi
 
 # 3. Ensure ~/.gstack global state directory exists
-mkdir -p "$HOME/.gstack/projects"
+mkdir -p "$SHARED_RUNTIME_ROOT/projects"
+SHARED_RUNTIME_ROOT_REAL="$(cd "$SHARED_RUNTIME_ROOT" && pwd -P)"
 
-# ─── Helper: link Claude skill subdirectories into a skills parent directory ──
+# --- Helper: link Claude skill subdirectories into a skills parent directory ---
 link_claude_skill_dirs() {
   local gstack_dir="$1"
   local skills_dir="$2"
@@ -156,9 +187,10 @@ link_claude_skill_dirs() {
   fi
 }
 
-# ─── Helper: link generated Codex skills into a skills parent directory ──
-# Installs from .agents/skills/gstack-* (the generated Codex-format skills)
-# instead of source dirs (which have Claude paths).
+# --- Helper: link generated discoverable Codex skills into a skills parent directory ---
+# Installs from .agents/skills/gstack-* (the generated agents-format skills)
+# instead of source dirs (which have Claude paths). The root gstack skill entry
+# is managed separately so discoverable entries and runtime assets stay distinct.
 link_codex_skill_dirs() {
   local gstack_dir="$1"
   local skills_dir="$2"
@@ -166,11 +198,11 @@ link_codex_skill_dirs() {
   local linked=()
 
   if [ ! -d "$agents_dir" ]; then
-    echo "  warning: no .agents/skills/ directory found — run 'bun run build' first" >&2
+    echo "  warning: no .agents/skills/ directory found - run 'bun run build' first" >&2
     return 1
   fi
 
-  for skill_dir in "$agents_dir"/gstack*/; do
+  for skill_dir in "$agents_dir"/gstack-*/; do
     if [ -f "$skill_dir/SKILL.md" ]; then
       skill_name="$(basename "$skill_dir")"
       target="$skills_dir/$skill_name"
@@ -186,84 +218,212 @@ link_codex_skill_dirs() {
   fi
 }
 
-# ─── Helper: create .agents/skills/gstack/ sidecar symlinks ──────────
-# Codex/Gemini/Cursor read skills from .agents/skills/. We link runtime
-# assets (bin/, browse/dist/, review/, qa/, etc.) so skill templates can
-# resolve paths like $SKILL_ROOT/review/design-checklist.md.
-create_agents_sidecar() {
-  local repo_root="$1"
-  local agents_gstack="$repo_root/.agents/skills/gstack"
-  mkdir -p "$agents_gstack"
+RUNTIME_ASSETS="bin browse .agents ETHOS.md VERSION CHANGELOG.md SKILL.md SKILL.md.tmpl package.json scripts setup supabase"
 
-  # Sidecar directories that skills reference at runtime
-  for asset in bin browse review qa; do
+# --- Helper: copy/symlink one runtime entry into a runtime home ---
+materialize_runtime_entry() {
+  local src="$1"
+  local dst="$2"
+  local resolved_src
+  local resolved_dst
+  [ -e "$src" ] || return 0
+
+  mkdir -p "$(dirname "$dst")"
+
+  if [ -d "$src" ]; then
+    resolved_src="$(cd "$src" && pwd -P)"
+  else
+    resolved_src="$(cd "$(dirname "$src")" && pwd -P)/$(basename "$src")"
+  fi
+
+  if [ -e "$dst" ]; then
+    if [ -d "$dst" ]; then
+      resolved_dst="$(cd "$dst" && pwd -P)"
+    else
+      resolved_dst="$(cd "$(dirname "$dst")" && pwd -P)/$(basename "$dst")"
+    fi
+
+    if [ "$resolved_src" = "$resolved_dst" ]; then
+      return 0
+    fi
+  fi
+
+  rm -rf "$dst"
+
+  if [ "$SETUP_MODE" = "dev" ]; then
+    ln -snf "$src" "$dst"
+  else
+    cp -R "$src" "$dst"
+  fi
+}
+
+# --- Helper: materialize shared/runtime assets into a runtime home ---
+# Runtime assets live in ~/.gstack canonically and in .gstack as the workspace fallback.
+materialize_runtime_assets() {
+  local runtime_root="$1"
+  mkdir -p "$runtime_root"
+
+  for asset in $RUNTIME_ASSETS; do
     local src="$GSTACK_DIR/$asset"
-    local dst="$agents_gstack/$asset"
-    if [ -d "$src" ] || [ -f "$src" ]; then
-      if [ -L "$dst" ] || [ ! -e "$dst" ]; then
-        ln -snf "$src" "$dst"
-      fi
+    local dst="$runtime_root/$asset"
+    materialize_runtime_entry "$src" "$dst"
+  done
+
+  for skill_dir in "$GSTACK_DIR"/*/; do
+    [ -d "$skill_dir" ] || continue
+    if [ -f "$skill_dir/SKILL.md" ]; then
+      local skill_name
+      skill_name="$(basename "$skill_dir")"
+      [ "$skill_name" = "node_modules" ] && continue
+      materialize_runtime_entry "$skill_dir" "$runtime_root/$skill_name"
     fi
   done
 
-  # Sidecar files that skills reference at runtime
-  for file in ETHOS.md; do
-    local src="$GSTACK_DIR/$file"
-    local dst="$agents_gstack/$file"
-    if [ -f "$src" ]; then
-      if [ -L "$dst" ] || [ ! -e "$dst" ]; then
-        ln -snf "$src" "$dst"
-      fi
-    fi
+  cleanup_legacy_agents_runtime "$runtime_root"
+}
+
+# --- Helper: remove legacy runtime assets from .agents/skills/gstack/ ---
+# Keep the tracked root generated SKILL.md, but remove install-time assets that used to
+# share the same directory.
+cleanup_legacy_agents_runtime() {
+  local repo_root="$1"
+  local legacy_root="$repo_root/.agents/skills/gstack"
+  [ -d "$legacy_root" ] || return 0
+
+  for asset in bin browse review qa gstack-upgrade ETHOS.md; do
+    rm -rf "$legacy_root/$asset"
   done
 }
 
-# 4. Install for Claude (default)
-SKILLS_BASENAME="$(basename "$SKILLS_DIR")"
-if [ "$INSTALL_CLAUDE" -eq 1 ]; then
-  if [ "$SKILLS_BASENAME" = "skills" ]; then
-    link_claude_skill_dirs "$GSTACK_DIR" "$SKILLS_DIR"
-    echo "gstack ready (claude)."
-    echo "  browse: $BROWSE_BIN"
-  else
-    echo "gstack ready (claude)."
-    echo "  browse: $BROWSE_BIN"
-    echo "  (skipped skill symlinks — not inside .claude/skills/)"
+# 4. Resolve repo/runtime roots
+resolve_workspace_repo_root() {
+  local candidate_root
+
+  if [ "$GSTACK_DIR" = "$SHARED_RUNTIME_ROOT_REAL" ]; then
+    return 1
   fi
+
+  case "$GSTACK_DIR" in
+    */.claude/skills/gstack|*/.codex/skills/gstack|*/.agents/skills/gstack)
+      candidate_root="$(dirname "$(dirname "$(dirname "$GSTACK_DIR")")")"
+      if git -C "$candidate_root" rev-parse --show-toplevel >/dev/null 2>&1 && [ "$(git -C "$candidate_root" rev-parse --show-toplevel)" = "$candidate_root" ]; then
+        printf '%s\n' "$candidate_root"
+        return 0
+      fi
+      return 1
+      ;;
+  esac
+
+  if git -C "$GSTACK_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
+    git -C "$GSTACK_DIR" rev-parse --show-toplevel
+    return 0
+  fi
+
+  return 1
+}
+
+WORKSPACE_REPO_ROOT=""
+if WORKSPACE_REPO_ROOT="$(resolve_workspace_repo_root)"; then
+  WORKSPACE_RUNTIME_ROOT="$WORKSPACE_REPO_ROOT/.gstack"
+else
+  WORKSPACE_RUNTIME_ROOT=""
 fi
 
-# 5. Install for Codex
+if [ "$INSTALL_AGENTS_SIDECAR" -eq 1 ] && [ "$INSTALL_CODEX" -eq 0 ] && [ -z "$WORKSPACE_RUNTIME_ROOT" ]; then
+  if [ "$HOST" = "gemini" ] || { [ "$HOST" = "auto" ] && [ "$INSTALL_CLAUDE" -eq 0 ]; }; then
+    echo "gstack setup failed: Gemini workspace install requires running inside a repo" >&2
+    echo "  Re-run from the target repo so setup can materialize .gstack for Gemini discovery." >&2
+    exit 1
+  fi
+  GEMINI_SKIPPED_NO_REPO=1
+fi
+
+# 5. Materialize shared runtime + workspace fallback
+materialize_runtime_assets "$SHARED_RUNTIME_ROOT"
+if [ -n "$WORKSPACE_RUNTIME_ROOT" ]; then
+  materialize_runtime_assets "$WORKSPACE_RUNTIME_ROOT"
+fi
+
+print_workspace_sidecar_status() {
+  if [ -n "$WORKSPACE_RUNTIME_ROOT" ]; then
+    echo "  workspace runtime sidecar: $WORKSPACE_RUNTIME_ROOT"
+  else
+    echo "  workspace runtime sidecar: not materialized (install inside a repo to provide .gstack fallback)"
+  fi
+}
+
+# 6. Install for Claude (default)
+if [ "$INSTALL_CLAUDE" -eq 1 ]; then
+  CLAUDE_SKILLS="$HOME/.claude/skills"
+  CLAUDE_ROOT_SKILL="$CLAUDE_SKILLS/gstack"
+  mkdir -p "$CLAUDE_SKILLS"
+
+  if [ "$CLAUDE_ROOT_SKILL" != "$GSTACK_DIR" ]; then
+    if [ -e "$CLAUDE_ROOT_SKILL" ] && [ ! -L "$CLAUDE_ROOT_SKILL" ]; then
+      if [ -f "$CLAUDE_ROOT_SKILL/SKILL.md" ]; then
+        rm -rf "$CLAUDE_ROOT_SKILL"
+      fi
+    fi
+    if [ -L "$CLAUDE_ROOT_SKILL" ] || [ ! -e "$CLAUDE_ROOT_SKILL" ]; then
+      ln -snf "$SHARED_RUNTIME_ROOT" "$CLAUDE_ROOT_SKILL"
+    fi
+    link_claude_skill_dirs "$CLAUDE_ROOT_SKILL" "$CLAUDE_SKILLS"
+  elif [ "$SKILLS_BASENAME" = "skills" ]; then
+    link_claude_skill_dirs "$GSTACK_DIR" "$SKILLS_DIR"
+    echo "  note: running from legacy Claude checkout root; sibling skills linked, but root entry was not replaced in-place"
+  else
+    echo "  note: skipped Claude root symlink migration because setup is running from the target directory"
+  fi
+
+  echo "gstack ready (claude)."
+  echo "  browse: $BROWSE_BIN"
+  echo "  shared runtime home: $SHARED_RUNTIME_ROOT"
+  echo "  claude root skill: $CLAUDE_ROOT_SKILL"
+fi
+
+# 7. Install for Codex
 if [ "$INSTALL_CODEX" -eq 1 ]; then
   CODEX_SKILLS="$HOME/.codex/skills"
-  CODEX_GSTACK="$CODEX_SKILLS/gstack"
+  CODEX_ROOT_SKILL="$CODEX_SKILLS/gstack"
   mkdir -p "$CODEX_SKILLS"
 
-  # Symlink gstack source for runtime assets (bin/, browse/dist/)
-  if [ -L "$CODEX_GSTACK" ] || [ ! -e "$CODEX_GSTACK" ]; then
-    ln -snf "$GSTACK_DIR" "$CODEX_GSTACK"
+  # Root discoverable entry points at the generated agents root skill.
+  # Migrate legacy real-directory installs to the new generated root skill.
+  if [ "$CODEX_ROOT_SKILL" != "$GSTACK_DIR" ]; then
+    if [ -e "$CODEX_ROOT_SKILL" ] && [ ! -L "$CODEX_ROOT_SKILL" ]; then
+      if [ -f "$CODEX_ROOT_SKILL/SKILL.md" ] && [ -e "$CODEX_ROOT_SKILL/bin" -o -e "$CODEX_ROOT_SKILL/browse" -o -e "$CODEX_ROOT_SKILL/review" -o -e "$CODEX_ROOT_SKILL/qa" -o -e "$CODEX_ROOT_SKILL/gstack-upgrade" -o -e "$CODEX_ROOT_SKILL/ETHOS.md" ]; then
+        rm -rf "$CODEX_ROOT_SKILL"
+      fi
+    fi
+    if [ -L "$CODEX_ROOT_SKILL" ] || [ ! -e "$CODEX_ROOT_SKILL" ]; then
+      ln -snf "$SHARED_RUNTIME_ROOT/.agents/skills/gstack" "$CODEX_ROOT_SKILL"
+    fi
+  else
+    echo "  note: skipped Codex root symlink migration because setup is running from the target directory"
   fi
-  # Install generated Codex-format skills (not Claude source dirs)
-  link_codex_skill_dirs "$GSTACK_DIR" "$CODEX_SKILLS"
+  # Install discoverable generated skills (not Claude source dirs)
+  link_codex_skill_dirs "$SHARED_RUNTIME_ROOT" "$CODEX_SKILLS"
 
   echo "gstack ready (codex)."
   echo "  browse: $BROWSE_BIN"
+  echo "  shared runtime home: $SHARED_RUNTIME_ROOT"
+  print_workspace_sidecar_status
+  echo "  codex root skill: $CODEX_ROOT_SKILL"
   echo "  codex skills: $CODEX_SKILLS"
 fi
 
-# 6. Create .agents/ sidecar symlinks (useful for Codex/Gemini/Cursor workspace-local)
-if [ "$INSTALL_CODEX" -eq 1 ]; then
-  # Detect repo root: if we're inside a skills directory, go up two levels
-  if [ "$SKILLS_BASENAME" = "skills" ]; then
-    REPO_ROOT="$(dirname "$SKILLS_DIR")"
-  else
-    REPO_ROOT="$GSTACK_DIR"
-  fi
-  create_agents_sidecar "$REPO_ROOT"
+# 8. Workspace runtime sidecar is available for any agents host
+if [ "$INSTALL_AGENTS_SIDECAR" -eq 1 ] && [ "$INSTALL_CODEX" -eq 0 ] && [ -n "$WORKSPACE_RUNTIME_ROOT" ]; then
+  echo "gstack ready (gemini)."
+  echo "  browse: $BROWSE_BIN"
+  echo "  shared runtime home: $SHARED_RUNTIME_ROOT"
+  print_workspace_sidecar_status
+elif [ "$GEMINI_SKIPPED_NO_REPO" -eq 1 ]; then
+  echo "  note: gemini workspace sidecar not materialized because setup is not running inside a repo"
 fi
 
-# 7. First-time welcome + legacy cleanup
-if [ ! -d "$HOME/.gstack" ]; then
-  mkdir -p "$HOME/.gstack"
+# 9. First-time welcome + legacy cleanup
+if [ "$FIRST_TIME_GSTACK" -eq 1 ]; then
   echo "  Welcome! Run /gstack-upgrade anytime to stay current."
 fi
 rm -f /tmp/gstack-latest-version
