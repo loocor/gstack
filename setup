@@ -78,6 +78,23 @@ ensure_playwright_browser() {
   fi
 }
 
+ensure_agents_skills_generated() {
+  if [ "$INSTALL_CODEX" -eq 0 ] && [ "$INSTALL_AGENTS_SIDECAR" -eq 0 ]; then
+    return 0
+  fi
+
+  if [ "$HAS_BUN" -ne 1 ]; then
+    echo "gstack setup failed: bun is required to generate agents-format discoverable skills" >&2
+    exit 1
+  fi
+
+  echo "Generating agents skills..."
+  (
+    cd "$GSTACK_DIR"
+    bun run scripts/gen-skill-docs.ts --host codex
+  )
+}
+
 # 1. Build browse binary if needed (smart rebuild: stale sources, package.json, lock, or wrong host binary)
 NEEDS_BUILD=0
 if [ ! -x "$BROWSE_BIN" ]; then
@@ -198,7 +215,8 @@ link_codex_skill_dirs() {
   local linked=()
 
   if [ ! -d "$agents_dir" ]; then
-    echo "  warning: no .agents/skills/ directory found - run 'bun run build' first" >&2
+    echo "  error: generated agents skills missing at $agents_dir" >&2
+    echo "  setup should materialize them via 'bun run scripts/gen-skill-docs.ts --host codex' before linking" >&2
     return 1
   fi
 
@@ -342,6 +360,8 @@ if [ "$INSTALL_AGENTS_SIDECAR" -eq 1 ] && [ "$INSTALL_CODEX" -eq 0 ] && [ -z "$W
   fi
   GEMINI_SKIPPED_NO_REPO=1
 fi
+
+ensure_agents_skills_generated
 
 # 5. Materialize shared runtime + workspace fallback
 materialize_runtime_assets "$SHARED_RUNTIME_ROOT"

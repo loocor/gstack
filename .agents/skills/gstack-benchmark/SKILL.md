@@ -327,7 +327,7 @@ When the user types `/benchmark`, run this skill.
 ### Phase 1: Setup
 
 ```bash
-source <(~/.gstack/bin/gstack-slug 2>/dev/null || echo "SLUG=unknown")
+eval "$(~/.gstack/bin/gstack-slug 2>/dev/null || echo "SLUG=unknown")"
 mkdir -p .gstack/benchmark-reports
 mkdir -p .gstack/benchmark-reports/baselines
 ```

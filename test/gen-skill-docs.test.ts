@@ -1,5 +1,5 @@
 // @ts-nocheck -- Bun test file; repo does not configure editor typings for Bun/Node built-ins.
-import { describe, test, expect } from 'bun:test';
+import { beforeAll, describe, test, expect } from 'bun:test';
 import { COMMAND_DESCRIPTIONS } from '../browse/src/commands';
 import { SNAPSHOT_FLAGS } from '../browse/src/snapshot';
 import {
@@ -42,6 +42,41 @@ const AGENTS_WORKSPACE_DISCOVERY_ROOT = path.posix.join(
   '.agents',
   'skills',
 );
+const CODEX_TEMPLATE_DIRS = findTemplateSkillDirs().filter(
+  dir => !AGENTS_LAYOUT.excludedSkills.includes(dir)
+);
+const EXPECTED_CODEX_FILES = CODEX_TEMPLATE_DIRS.map(
+  dir => `.agents/skills/${codexSkillName(dir)}/SKILL.md`
+);
+const EXPECTED_CODEX_PATHS = CODEX_TEMPLATE_DIRS.map(
+  dir => path.join(AGENTS_DIR, codexSkillName(dir), 'SKILL.md')
+);
+
+function runSkillDocs(hostId: 'claude' | 'codex' | 'agents', dryRun = false) {
+  const args = ['bun', 'run', 'scripts/gen-skill-docs.ts'];
+  if (hostId !== 'claude') args.push('--host', hostId);
+  if (dryRun) args.push('--dry-run');
+  return Bun.spawnSync(args, {
+    cwd: ROOT,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+}
+
+function ensureCodexArtifacts(): void {
+  const missing = EXPECTED_CODEX_PATHS.filter(file => !fs.existsSync(file));
+  if (missing.length === 0) return;
+
+  const generated = runSkillDocs('codex');
+  if (generated.exitCode !== 0) {
+    throw new Error(generated.stderr.toString() || generated.stdout.toString() || 'Failed to generate Codex skills');
+  }
+
+  const stillMissing = missing.filter(file => !fs.existsSync(file));
+  if (stillMissing.length > 0) {
+    throw new Error(`Failed to materialize Codex skills: ${stillMissing.join(', ')}`);
+  }
+}
 
 describe('host registry contract', () => {
   test('maps Claude, Codex, and Gemini to the expected layouts', () => {
@@ -174,16 +209,10 @@ describe('gen-skill-docs', () => {
   });
 
   for (const hostId of GENERATED_HOSTS) {
-    test(`${generatedHostLabel(hostId)} generated files are fresh (match --dry-run)`, () => {
-      const args = ['bun', 'run', 'scripts/gen-skill-docs.ts'];
-      if (hostId !== 'claude') args.push('--host', hostId);
-      args.push('--dry-run');
+    test(`${generatedHostLabel(hostId)} generated files match --dry-run contract`, () => {
+      if (hostId !== 'claude') ensureCodexArtifacts();
 
-      const result = Bun.spawnSync(args, {
-        cwd: ROOT,
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
+      const result = runSkillDocs(hostId, true);
       expect(result.exitCode).toBe(0);
       const output = result.stdout.toString();
 
@@ -193,10 +222,7 @@ describe('gen-skill-docs', () => {
           expect(output).toContain(`FRESH: ${file}`);
         }
       } else {
-        const expectedSkills = findTemplateSkillDirs()
-          .filter(dir => !AGENTS_LAYOUT.excludedSkills.includes(dir))
-          .map(dir => `.agents/skills/${codexSkillName(dir)}/SKILL.md`);
-        for (const file of expectedSkills) {
+        for (const file of EXPECTED_CODEX_FILES) {
           expect(output).toContain(`FRESH: ${file}`);
         }
       }
@@ -784,8 +810,11 @@ describe('BENEFITS_FROM resolver', () => {
 // ─── Codex Generation Tests ─────────────────────────────────
 
 describe('Codex generation (--host codex)', () => {
-  const CODEX_SKILLS = findTemplateSkillDirs()
-    .filter(dir => !AGENTS_LAYOUT.excludedSkills.includes(dir))
+  beforeAll(() => {
+    ensureCodexArtifacts();
+  });
+
+  const CODEX_SKILLS = CODEX_TEMPLATE_DIRS
     .map(dir => ({ dir: dir === '' ? '.' : dir, codexName: codexSkillName(dir) }));
 
   test('--host codex generates correct output paths', () => {
@@ -862,8 +891,8 @@ describe('Codex generation (--host codex)', () => {
     expect(result.exitCode).toBe(0);
     const output = result.stdout.toString();
     // Every Codex skill should be FRESH
-    for (const skill of CODEX_SKILLS) {
-      expect(output).toContain(`FRESH: .agents/skills/${skill.codexName}/SKILL.md`);
+    for (const file of EXPECTED_CODEX_FILES) {
+      expect(output).toContain(`FRESH: ${file}`);
     }
     expect(output).not.toContain('STALE');
   });
@@ -1053,6 +1082,12 @@ describe('setup script validation', () => {
     expect(fnBody).toContain('.agents/skills');
     expect(fnBody).toContain('gstack-*');
     expect(fnBody).not.toContain('for skill_dir in "$agents_dir"/*/');
+  });
+
+  test('setup generates agents skills before materializing runtime homes', () => {
+    expect(setupContent).toContain('ensure_agents_skills_generated()');
+    expect(setupContent).toContain('bun run scripts/gen-skill-docs.ts --host codex');
+    expect(setupContent).toContain('ensure_agents_skills_generated\n\n# 5. Materialize shared runtime + workspace fallback');
   });
 
   test('link_claude_skill_dirs creates relative symlinks', () => {

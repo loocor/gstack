@@ -58,6 +58,8 @@ Real files get committed to your repo (not a submodule), so `git clone` just wor
 
 gstack works on any agent that supports the [SKILL.md standard](https://github.com/anthropics/claude-code). Codex gets global discoverable entrypoints, while Gemini uses the repo-local `.gstack` workspace fallback.
 
+Install to one repo:
+
 ```bash
 bunx gstack install --host codex
 ```

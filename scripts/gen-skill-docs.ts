@@ -35,6 +35,39 @@ interface TemplateContext {
 	paths: LayoutPaths;
 }
 
+const AI_SLOP_BLACKLIST = [
+	"Purple/violet/indigo gradient backgrounds or blue-to-purple color schemes",
+	"**The 3-column feature grid:** icon-in-colored-circle + bold title + 2-line description, repeated 3x symmetrically. THE most recognizable AI layout.",
+	"Icons in colored circles as section decoration (SaaS starter template look)",
+	"Centered everything (`text-align: center` on all headings, descriptions, cards)",
+	"Uniform bubbly border-radius on every element (same large radius on everything)",
+	"Decorative blobs, floating circles, wavy SVG dividers (if a section feels empty, it needs better content, not decoration)",
+	"Emoji as design elements (rockets in headings, emoji as bullet points)",
+	"Colored left-border on cards (`border-left: 3px solid <accent>`)",
+	'Generic hero copy ("Welcome to [X]", "Unlock the power of...", "Your all-in-one solution for...")',
+	"Cookie-cutter section rhythm (hero → 3 features → testimonials → pricing → CTA, every section same height)",
+];
+
+const OPENAI_HARD_REJECTIONS = [
+	"Generic SaaS card grid as first impression",
+	"Beautiful image with weak brand",
+	"Strong headline with no clear action",
+	"Busy imagery behind text",
+	"Sections repeating same mood statement",
+	"Carousel with no narrative purpose",
+	"App UI made of stacked cards instead of layout",
+];
+
+const OPENAI_LITMUS_CHECKS = [
+	"Brand/product unmistakable in first screen?",
+	"One strong visual anchor present?",
+	"Page understandable by scanning headlines only?",
+	"Each section has one job?",
+	"Are cards actually necessary?",
+	"Does motion improve hierarchy or atmosphere?",
+	"Would design feel premium with all decorative shadows removed?",
+];
+
 // ─── Placeholder Resolvers ──────────────────────────────────
 
 function generateCommandReference(_ctx: TemplateContext): string {
@@ -2023,6 +2056,338 @@ The screenshot file at \`/tmp/gstack-sketch.png\` can be referenced by downstrea
 (\`/plan-design-review\`, \`/design-review\`) to see what was originally envisioned.`;
 }
 
+function generateSlugEval(ctx: TemplateContext): string {
+	return `eval "$(${ctx.paths.sharedBinDir}/gstack-slug 2>/dev/null)"`;
+}
+
+function generateSlugSetup(ctx: TemplateContext): string {
+	return `eval "$(${ctx.paths.sharedBinDir}/gstack-slug 2>/dev/null)" && mkdir -p ~/.gstack/projects/$SLUG`;
+}
+
+function generateCodexSecondOpinion(ctx: TemplateContext): string {
+	if (ctx.hostId === "codex") return "";
+
+	return `## Phase 3.5: Cross-Model Second Opinion (optional)
+
+**Binary check first — no question if unavailable:**
+
+\`\`\`bash
+which codex 2>/dev/null && echo "CODEX_AVAILABLE" || echo "CODEX_NOT_AVAILABLE"
+\`\`\`
+
+If \`CODEX_NOT_AVAILABLE\`: skip Phase 3.5 entirely — no message, no AskUserQuestion. Proceed directly to Phase 4.
+
+If \`CODEX_AVAILABLE\`: use AskUserQuestion:
+
+> Want a second opinion from a different AI model? Codex will independently review your problem statement, key answers, premises, and any landscape findings from this session. It hasn't seen this conversation — it gets a structured summary. Usually takes 2-5 minutes.
+> A) Yes, get a second opinion
+> B) No, proceed to alternatives
+
+If B: skip Phase 3.5 entirely. Remember that Codex did NOT run (affects design doc, founder signals, and Phase 4 below).
+
+**If A: Run the Codex cold read.**
+
+1. Assemble a structured context block from Phases 1-3:
+   - Mode (Startup or Builder)
+   - Problem statement (from Phase 1)
+   - Key answers from Phase 2A/2B (summarize each Q&A in 1-2 sentences, include verbatim user quotes)
+   - Landscape findings (from Phase 2.75, if search was run)
+   - Agreed premises (from Phase 3)
+   - Codebase context (project name, languages, recent activity)
+
+2. **Write the assembled prompt to a temp file** (prevents shell injection from user-derived content):
+
+\`\`\`bash
+CODEX_PROMPT_FILE=$(mktemp /tmp/gstack-codex-oh-XXXXXXXX.txt)
+\`\`\`
+
+Write the full prompt (context block + instructions) to this file. Use the mode-appropriate variant:
+
+**Startup mode instructions:** "You are an independent technical advisor reading a transcript of a startup brainstorming session. [CONTEXT BLOCK HERE]. Your job: 1) What is the STRONGEST version of what this person is trying to build? Steelman it in 2-3 sentences. 2) What is the ONE thing from their answers that reveals the most about what they should actually build? Quote it and explain why. 3) Name ONE agreed premise you think is wrong, and what evidence would prove you right. 4) If you had 48 hours and one engineer to build a prototype, what would you build? Be specific — tech stack, features, what you'd skip. Be direct. Be terse. No preamble."
+
+**Builder mode instructions:** "You are an independent technical advisor reading a transcript of a builder brainstorming session. [CONTEXT BLOCK HERE]. Your job: 1) What is the COOLEST version of this they haven't considered? 2) What's the ONE thing from their answers that reveals what excites them most? Quote it. 3) What existing open source project or tool gets them 50% of the way there — and what's the 50% they'd need to build? 4) If you had a weekend to build this, what would you build first? Be specific. Be direct. No preamble."
+
+3. Run Codex:
+
+\`\`\`bash
+TMPERR_OH=$(mktemp /tmp/codex-oh-err-XXXXXXXX)
+codex exec "$(cat "$CODEX_PROMPT_FILE")" -s read-only -c 'model_reasoning_effort="xhigh"' --enable web_search_cached 2>"$TMPERR_OH"
+\`\`\`
+
+Use a 5-minute timeout (\`timeout: 300000\`). After the command completes, read stderr:
+\`\`\`bash
+cat "$TMPERR_OH"
+rm -f "$TMPERR_OH" "$CODEX_PROMPT_FILE"
+\`\`\`
+
+**Error handling:** All errors are non-blocking — Codex second opinion is a quality enhancement, not a prerequisite.
+- **Auth failure:** If stderr contains "auth", "login", "unauthorized", or "API key": "Codex authentication failed. Run \\\`codex login\\\` to authenticate. Skipping second opinion."
+- **Timeout:** "Codex timed out after 5 minutes. Skipping second opinion."
+- **Empty response:** "Codex returned no response. Stderr: <paste relevant error>. Skipping second opinion."
+
+On any error, proceed to Phase 4 — do NOT fall back to a Claude subagent (this is brainstorming, not adversarial review).
+
+4. **Presentation:**
+
+\`\`\`
+SECOND OPINION (Codex):
+════════════════════════════════════════════════════════════
+<full codex output, verbatim — do not truncate or summarize>
+════════════════════════════════════════════════════════════
+\`\`\`
+
+5. **Cross-model synthesis:** After presenting Codex output, provide 3-5 bullet synthesis:
+   - Where Claude agrees with Codex
+   - Where Claude disagrees and why
+   - Whether Codex's challenged premise changes Claude's recommendation
+
+6. **Premise revision check:** If Codex challenged an agreed premise, use AskUserQuestion:
+
+> Codex challenged premise #{N}: "{premise text}". Their argument: "{reasoning}".
+> A) Revise this premise based on Codex's input
+> B) Keep the original premise — proceed to alternatives
+
+If A: revise the premise and note the revision. If B: proceed (and note that the user defended this premise with reasoning — this is a founder signal if they articulate WHY they disagree, not just dismiss).`;
+}
+
+function generateDesignHardRules(_ctx: TemplateContext): string {
+	const slopItems = AI_SLOP_BLACKLIST.map((item, i) => `${i + 1}. ${item}`).join("\n");
+	const rejectionItems = OPENAI_HARD_REJECTIONS.map((item, i) => `${i + 1}. ${item}`).join("\n");
+	const litmusItems = OPENAI_LITMUS_CHECKS.map((item, i) => `${i + 1}. ${item}`).join("\n");
+
+	return `### Design Hard Rules
+
+**Classifier — determine rule set before evaluating:**
+- **MARKETING/LANDING PAGE** (hero-driven, brand-forward, conversion-focused) → apply Landing Page Rules
+- **APP UI** (workspace-driven, data-dense, task-focused: dashboards, admin, settings) → apply App UI Rules
+- **HYBRID** (marketing shell with app-like sections) → apply Landing Page Rules to hero/marketing sections, App UI Rules to functional sections
+
+**Hard rejection criteria** (instant-fail patterns — flag if ANY apply):
+${rejectionItems}
+
+**Litmus checks** (answer YES/NO for each — used for cross-model consensus scoring):
+${litmusItems}
+
+**Landing page rules** (apply when classifier = MARKETING/LANDING):
+- First viewport reads as one composition, not a dashboard
+- Brand-first hierarchy: brand > headline > body > CTA
+- Typography: expressive, purposeful — no default stacks (Inter, Roboto, Arial, system)
+- No flat single-color backgrounds — use gradients, images, subtle patterns
+- Hero: full-bleed, edge-to-edge, no inset/tiled/rounded variants
+- Hero budget: brand, one headline, one supporting sentence, one CTA group, one image
+- No cards in hero. Cards only when card IS the interaction
+- One job per section: one purpose, one headline, one short supporting sentence
+- Motion: 2-3 intentional motions minimum (entrance, scroll-linked, hover/reveal)
+- Color: define CSS variables, avoid purple-on-white defaults, one accent color default
+- Copy: product language not design commentary. "If deleting 30% improves it, keep deleting"
+- Beautiful defaults: composition-first, brand as loudest text, two typefaces max, cardless by default, first viewport as poster not document
+
+**App UI rules** (apply when classifier = APP UI):
+- Calm surface hierarchy, strong typography, few colors
+- Dense but readable, minimal chrome
+- Organize: primary workspace, navigation, secondary context, one accent
+- Avoid: dashboard-card mosaics, thick borders, decorative gradients, ornamental icons
+- Copy: utility language — orientation, status, action. Not mood/brand/aspiration
+- Cards only when card IS the interaction
+- Section headings state what area is or what user can do ("Selected KPIs", "Plan status")
+
+**Universal rules** (apply to ALL types):
+- Define CSS variables for color system
+- No default font stacks (Inter, Roboto, Arial, system)
+- One job per section
+- "If deleting 30% of the copy improves it, keep deleting"
+- Cards earn their existence — no decorative card grids
+
+**AI Slop blacklist** (the 10 patterns that scream "AI-generated"):
+${slopItems}
+
+Source: [OpenAI "Designing Delightful Frontends with GPT-5.4"](https://developers.openai.com/blog/designing-delightful-frontends-with-gpt-5-4) (Mar 2026) + gstack design methodology.`;
+}
+
+function generateDesignOutsideVoices(ctx: TemplateContext): string {
+	if (ctx.hostId === "codex") return "";
+
+	const rejectionList = OPENAI_HARD_REJECTIONS.map((item, i) => `${i + 1}. ${item}`).join("\n");
+	const litmusList = OPENAI_LITMUS_CHECKS.map((item, i) => `${i + 1}. ${item}`).join("\n");
+
+	const isPlanDesignReview = ctx.skillName === "plan-design-review";
+	const isDesignReview = ctx.skillName === "design-review";
+	const isDesignConsultation = ctx.skillName === "design-consultation";
+	const isAutomatic = isDesignReview;
+	const reasoningEffort = isDesignConsultation ? "medium" : "high";
+
+	let codexPrompt: string;
+	let subagentPrompt: string;
+
+	if (isPlanDesignReview) {
+		codexPrompt = `Read the plan file at [plan-file-path]. Evaluate this plan's UI/UX design against these criteria.
+
+HARD REJECTION — flag if ANY apply:
+${rejectionList}
+
+LITMUS CHECKS — answer YES or NO for each:
+${litmusList}
+
+HARD RULES — first classify as MARKETING/LANDING PAGE vs APP UI vs HYBRID, then flag violations of the matching rule set:
+- MARKETING: First viewport as one composition, brand-first hierarchy, full-bleed hero, 2-3 intentional motions, composition-first layout
+- APP UI: Calm surface hierarchy, dense but readable, utility language, minimal chrome
+- UNIVERSAL: CSS variables for colors, no default font stacks, one job per section, cards earn existence
+
+For each finding: what's wrong, what will happen if it ships unresolved, and the specific fix. Be opinionated. No hedging.`;
+
+		subagentPrompt = `Read the plan file at [plan-file-path]. You are an independent senior product designer reviewing this plan. You have NOT seen any prior review. Evaluate:
+
+1. Information hierarchy: what does the user see first, second, third? Is it right?
+2. Missing states: loading, empty, error, success, partial — which are unspecified?
+3. User journey: what's the emotional arc? Where does it break?
+4. Specificity: does the plan describe SPECIFIC UI ("48px Söhne Bold header, #1a1a1a on white") or generic patterns ("clean modern card-based layout")?
+5. What design decisions will haunt the implementer if left ambiguous?
+
+For each finding: what's wrong, severity (critical/high/medium), and the fix.`;
+	} else if (isDesignReview) {
+		codexPrompt = `Review the frontend source code in this repo. Evaluate against these design hard rules:
+- Spacing: systematic (design tokens / CSS variables) or magic numbers?
+- Typography: expressive purposeful fonts or default stacks?
+- Color: CSS variables with defined system, or hardcoded hex scattered?
+- Responsive: breakpoints defined? calc(100svh - header) for heroes? Mobile tested?
+- A11y: ARIA landmarks, alt text, contrast ratios, 44px touch targets?
+- Motion: 2-3 intentional animations, or zero / ornamental only?
+- Cards: used only when card IS the interaction? No decorative card grids?
+
+First classify as MARKETING/LANDING PAGE vs APP UI vs HYBRID, then apply matching rules.
+
+LITMUS CHECKS — answer YES/NO:
+${litmusList}
+
+HARD REJECTION — flag if ANY apply:
+${rejectionList}
+
+Be specific. Reference file:line for every finding.`;
+
+		subagentPrompt = `Review the frontend source code in this repo. You are an independent senior product designer doing a source-code design audit. Focus on CONSISTENCY PATTERNS across files rather than individual violations:
+- Are spacing values systematic across the codebase?
+- Is there ONE color system or scattered approaches?
+- Do responsive breakpoints follow a consistent set?
+- Is the accessibility approach consistent or spotty?
+
+For each finding: what's wrong, severity (critical/high/medium), and the file:line.`;
+	} else if (isDesignConsultation) {
+		codexPrompt = `Given this product context, propose a complete design direction:
+- Visual thesis: one sentence describing mood, material, and energy
+- Typography: specific font names (not defaults — no Inter/Roboto/Arial/system) + hex colors
+- Color system: CSS variables for background, surface, primary text, muted text, accent
+- Layout: composition-first, not component-first. First viewport as poster, not document
+- Differentiation: 2 deliberate departures from category norms
+- Anti-slop: no purple gradients, no 3-column icon grids, no centered everything, no decorative blobs
+
+Be opinionated. Be specific. Do not hedge. This is YOUR design direction — own it.`;
+
+		subagentPrompt = `Given this product context, propose a design direction that would SURPRISE. What would the cool indie studio do that the enterprise UI team wouldn't?
+- Propose an aesthetic direction, typography stack (specific font names), color palette (hex values)
+- 2 deliberate departures from category norms
+- What emotional reaction should the user have in the first 3 seconds?
+
+Be bold. Be specific. No hedging.`;
+	} else {
+		return "";
+	}
+
+	const optInSection = isAutomatic
+		? `
+**Automatic:** Outside voices run automatically when Codex is available. No opt-in needed.`
+		: `
+Use AskUserQuestion:
+> "Want outside design voices${isPlanDesignReview ? " before the detailed review" : ""}? Codex evaluates against OpenAI's design hard rules + litmus checks; Claude subagent does an independent ${isDesignConsultation ? "design direction proposal" : "completeness review"}."
+>
+> A) Yes — run outside design voices
+> B) No — proceed without
+
+If user chooses B, skip this step and continue.`;
+
+	const synthesisSection = isPlanDesignReview
+		? `
+**Synthesis — Litmus scorecard:**
+
+\`\`\`
+DESIGN OUTSIDE VOICES — LITMUS SCORECARD:
+═══════════════════════════════════════════════════════════════
+  Check                                    Claude  Codex  Consensus
+  ─────────────────────────────────────── ─────── ─────── ─────────
+  1. Brand unmistakable in first screen?   —       —      —
+  2. One strong visual anchor?             —       —      —
+  3. Scannable by headlines only?          —       —      —
+  4. Each section has one job?             —       —      —
+  5. Cards actually necessary?             —       —      —
+  6. Motion improves hierarchy?            —       —      —
+  7. Premium without decorative shadows?   —       —      —
+  ─────────────────────────────────────── ─────── ─────── ─────────
+  Hard rejections triggered:               —       —      —
+═══════════════════════════════════════════════════════════════
+\`\`\`
+
+Fill in each cell from the Codex and subagent outputs. CONFIRMED = both agree. DISAGREE = models differ. NOT SPEC'D = not enough info to evaluate.
+
+**Pass integration (respects existing 7-pass contract):**
+- Hard rejections → raised as the FIRST items in Pass 1, tagged \`[HARD REJECTION]\`
+- Litmus DISAGREE items → raised in the relevant pass with both perspectives
+- Litmus CONFIRMED failures → pre-loaded as known issues in the relevant pass
+- Passes can skip discovery and go straight to fixing for pre-identified issues`
+		: isDesignConsultation
+			? `
+**Synthesis:** Claude main references both Codex and subagent proposals in the Phase 3 proposal. Present:
+- Areas of agreement between all three voices (Claude main + Codex + subagent)
+- Genuine divergences as creative alternatives for the user to choose from
+- "Codex and I agree on X. Codex suggested Y where I'm proposing Z — here's why..."`
+			: `
+**Synthesis — Litmus scorecard:**
+
+Use the same scorecard format as /plan-design-review (shown above). Fill in from both outputs.
+Merge findings into the triage with \`[codex]\` / \`[subagent]\` / \`[cross-model]\` tags.`;
+
+	const escapedCodexPrompt = codexPrompt.replace(/`/g, "\\`").replace(/\$/g, "\\$");
+
+	return `## Design Outside Voices (parallel)
+${optInSection}
+
+**Check Codex availability:**
+\`\`\`bash
+which codex 2>/dev/null && echo "CODEX_AVAILABLE" || echo "CODEX_NOT_AVAILABLE"
+\`\`\`
+
+**If Codex is available**, launch both voices simultaneously:
+
+1. **Codex design voice** (via Bash):
+\`\`\`bash
+TMPERR_DESIGN=$(mktemp /tmp/codex-design-XXXXXXXX)
+codex exec "${escapedCodexPrompt}" -s read-only -c 'model_reasoning_effort="${reasoningEffort}"' --enable web_search_cached 2>"$TMPERR_DESIGN"
+\`\`\`
+Use a 5-minute timeout (\`timeout: 300000\`). After the command completes, read stderr:
+\`\`\`bash
+cat "$TMPERR_DESIGN" && rm -f "$TMPERR_DESIGN"
+\`\`\`
+
+2. **Claude design subagent** (via Agent tool):
+Dispatch a subagent with this prompt:
+"${subagentPrompt}"
+
+**Error handling (all non-blocking):**
+- **Auth failure:** If stderr contains "auth", "login", "unauthorized", or "API key": "Codex authentication failed. Run \`codex login\` to authenticate."
+- **Timeout:** "Codex timed out after 5 minutes."
+- **Empty response:** "Codex returned no response."
+- On any Codex error: proceed with Claude subagent output only, tagged \`[single-model]\`.
+- If Claude subagent also fails: "Outside voices unavailable — continuing with primary review."
+
+Present Codex output under a \`CODEX SAYS (design ${isPlanDesignReview ? "critique" : isDesignReview ? "source audit" : "direction"}):\` header.
+Present subagent output under a \`CLAUDE SUBAGENT (design ${isPlanDesignReview ? "completeness" : isDesignReview ? "consistency" : "direction"}):\` header.
+${synthesisSection}
+
+**Log the result:**
+\`\`\`bash
+${ctx.paths.sharedBinDir}/gstack-review-log '{"skill":"design-outside-voices","timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","status":"STATUS","source":"SOURCE","commit":"'"$(git rev-parse --short HEAD)"'"}'
+\`\`\`
+Replace STATUS with "clean" or "issues_found", SOURCE with "codex+subagent", "codex-only", "subagent-only", or "unavailable".`;
+}
+
 function generateAdversarialStep(ctx: TemplateContext): string {
 	// Codex host: strip entirely — Codex should never invoke itself
 	if (ctx.hostId === "codex") return "";
@@ -2221,9 +2586,14 @@ const RESOLVERS: Record<string, (ctx: TemplateContext) => string> = {
 	TEST_FAILURE_TRIAGE: generateTestFailureTriage,
 	SPEC_REVIEW_LOOP: generateSpecReviewLoop,
 	DESIGN_SKETCH: generateDesignSketch,
+	DESIGN_HARD_RULES: generateDesignHardRules,
+	DESIGN_OUTSIDE_VOICES: generateDesignOutsideVoices,
 	BENEFITS_FROM: generateBenefitsFrom,
+	CODEX_SECOND_OPINION: generateCodexSecondOpinion,
 	CODEX_REVIEW_STEP: generateAdversarialStep,
 	ADVERSARIAL_STEP: generateAdversarialStep,
+	SLUG_EVAL: generateSlugEval,
+	SLUG_SETUP: generateSlugSetup,
 	DEPLOY_BOOTSTRAP: generateDeployBootstrap,
 };
 

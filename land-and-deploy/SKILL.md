@@ -884,7 +884,7 @@ Save report to `.gstack/deploy-reports/{date}-pr{number}-deploy.md`.
 Log to the review dashboard:
 
 ```bash
-source <(~/.gstack/bin/gstack-slug 2>/dev/null)
+eval "$(~/.gstack/bin/gstack-slug 2>/dev/null)"
 mkdir -p ~/.gstack/projects/$SLUG
 ```
 

@@ -250,9 +250,9 @@ bun run build
 
 | Aspect | Claude | Codex |
 |--------|--------|-------|
-| Output directory | `{skill}/SKILL.md` | `.agents/skills/gstack-{skill}/SKILL.md` |
+| Output directory | `{skill}/SKILL.md` | `.agents/skills/gstack-{skill}/SKILL.md` (generated at setup, gitignored) |
 | Frontmatter | Full (name, description, allowed-tools, hooks, version) | Minimal (name + description only) |
-| Discoverability layer | `~/.claude/skills/gstack` | `~/.codex/skills/gstack` |
+| Discoverability layer | `~/.claude/skills/gstack` | `~/.codex/skills/gstack` plus repo-local `.gstack/.agents/skills/` fallback when materialized |
 | Shared runtime home | `~/.gstack` | `~/.gstack` |
 | Hook skills | `hooks:` frontmatter (enforced by Claude) | Inline safety advisory prose (advisory only) |
 | `/codex` skill | Included (Claude wraps codex exec) | Excluded (self-referential) |
@@ -273,7 +273,7 @@ bun run skill:check
 
 ### Dev setup for .agents/
 
-When you run `bin/dev-setup`, it creates symlinks in both `.claude/skills/` and `.agents/skills/` (if applicable), so Codex-compatible agents can discover your dev skills too.
+When you run `bin/dev-setup`, it creates symlinks in both `.claude/skills/` and `.agents/skills/` (if applicable), so Codex-compatible agents can discover your dev skills too. The `.agents/` directory is generated at setup time from `.tmpl` templates — it is gitignored and not committed.
 
 ### Adding a new skill
 
@@ -281,7 +281,7 @@ When you add a new skill template, both hosts get it automatically:
 1. Create `{skill}/SKILL.md.tmpl`
 2. Run `bun run gen:skill-docs` (Claude output) and `bun run gen:skill-docs --host codex` (Codex output)
 3. The dynamic template discovery picks it up — no static list to update
-4. Commit both `{skill}/SKILL.md` and `.agents/skills/gstack-{skill}/SKILL.md`
+4. Commit `{skill}/SKILL.md` — `.agents/` is generated at setup time and gitignored
 
 ## Conductor workspaces
 
