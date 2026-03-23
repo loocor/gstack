@@ -67,6 +67,14 @@ describe('host registry contract', () => {
     expect(HOSTS.gemini.discoveryMode).toBe('workspace-sidecar');
   });
 
+  test('uses validation-aware workspace precedence across host layouts', () => {
+    expect(LAYOUTS.claude.localFirstResolutionPolicy).toBe('workspace-validated');
+    expect(LAYOUTS.agents.localFirstResolutionPolicy).toBe('workspace-validated');
+    expect(HOSTS.claude.localFirstResolutionPolicy).toBe('workspace-validated');
+    expect(HOSTS.codex.localFirstResolutionPolicy).toBe('workspace-validated');
+    expect(HOSTS.gemini.localFirstResolutionPolicy).toBe('workspace-validated');
+  });
+
   test('gemini host arg resolves to the agents generation target', () => {
     expect(GENERATION_ALIASES.gemini).toBe('codex');
     const target = resolveGenerationTarget('gemini');
@@ -997,6 +1005,40 @@ describe('setup script validation', () => {
     expect(binContent).toContain('while [ -L "$SCRIPT_PATH" ]; do');
     expect(binContent).toContain('LINK_TARGET="$(readlink "$SCRIPT_PATH")"');
     expect(binContent).toContain('ROOT="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd -P)"');
+  });
+
+  test('gstack-upgrade template centers ~/.gstack as the primary install', () => {
+    const upgradeTemplate = fs.readFileSync(path.join(ROOT, 'gstack-upgrade', 'SKILL.md.tmpl'), 'utf-8');
+    expect(upgradeTemplate).toContain('If no output (the primary `~/.gstack` install is already up to date): check for a stale workspace sidecar.');
+    expect(upgradeTemplate).toContain('**For git installs** (`global-git`):');
+    expect(upgradeTemplate).not.toContain('local-git');
+    expect(upgradeTemplate).toContain('Also refreshed workspace sidecar at `$LOCAL_GSTACK` from the primary install in `~/.gstack`.');
+  });
+
+  test('gstack-upgrade template only deletes backups after successful replacement', () => {
+    const upgradeTemplate = fs.readFileSync(path.join(ROOT, 'gstack-upgrade', 'SKILL.md.tmpl'), 'utf-8');
+    expect(upgradeTemplate).toContain('if cd "$INSTALL_DIR" && ./setup --host auto; then');
+    expect(upgradeTemplate).toContain('rm -rf "$INSTALL_DIR.bak" "$TMP_DIR"');
+    expect(upgradeTemplate).toContain('rm -rf "$INSTALL_DIR"');
+    expect(upgradeTemplate).toContain('mv "$INSTALL_DIR.bak" "$INSTALL_DIR"');
+    expect(upgradeTemplate).toContain('Do the detection, copy, setup, and rollback in one bash block');
+    expect(upgradeTemplate).toContain('INSTALL_DIR="$HOME/.gstack"');
+    expect(upgradeTemplate).toContain('if [ -n "$LOCAL_GSTACK" ]; then');
+    expect(upgradeTemplate).toContain('rm -rf "$LOCAL_GSTACK.bak"');
+    expect(upgradeTemplate).toContain('mv "$LOCAL_GSTACK.bak" "$LOCAL_GSTACK"');
+    expect(upgradeTemplate).toContain('Do not claim a `.bak` restore here — `global-git` upgrades happen in-place.');
+  });
+
+  test('gstack-upgrade template does not rely on cross-block shell variables', () => {
+    const upgradeTemplate = fs.readFileSync(path.join(ROOT, 'gstack-upgrade', 'SKILL.md.tmpl'), 'utf-8');
+    expect(upgradeTemplate).toContain('cat "$HOME/.gstack/VERSION" 2>/dev/null || echo "unknown"');
+    expect(upgradeTemplate).toContain("cat > ~/.gstack/just-upgraded-from <<'EOF'");
+    expect(upgradeTemplate).toContain('<old-version>');
+    expect(upgradeTemplate).toContain('Read `~/.gstack/CHANGELOG.md`.');
+    expect(upgradeTemplate).toContain('PRIMARY_VER=$(cat "$HOME/.gstack/VERSION" 2>/dev/null || echo "unknown")');
+    expect(upgradeTemplate).not.toContain('echo "$OLD_VERSION" > ~/.gstack/just-upgraded-from');
+    expect(upgradeTemplate).not.toContain('Read `$INSTALL_DIR/CHANGELOG.md`.');
+    expect(upgradeTemplate).not.toContain('PRIMARY_VER=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "unknown")');
   });
 });
 

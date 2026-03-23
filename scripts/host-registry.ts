@@ -10,7 +10,7 @@ export type DiscoveryMode = 'global' | 'workspace-sidecar' | 'both';
 export type FrontmatterProfile = 'full' | 'minimal';
 export type PathRewriteProfile = 'none' | 'shared-runtime';
 export type ArtifactMaterializationStrategy = 'source' | 'generated';
-export type LocalFirstResolutionPolicy = 'global-first' | 'workspace-first';
+export type LocalFirstResolutionPolicy = 'global-first' | 'workspace-first' | 'workspace-validated';
 export type SessionRunnerId = 'claude' | 'codex' | 'gemini';
 export type HostArg = GeneratedHostId | 'agents' | 'gemini';
 
@@ -127,7 +127,7 @@ export const LAYOUTS: Record<SkillLayoutId, SkillLayoutProfile> = {
     pathRewriteProfile: 'shared-runtime',
     excludedSkills: [],
     artifactMaterializationStrategy: 'source',
-    localFirstResolutionPolicy: 'workspace-first',
+    localFirstResolutionPolicy: 'workspace-validated',
     outputPath(root, skillDir) {
       const baseDir = skillDir === '.' ? root : path.join(root, skillDir);
       return path.join(baseDir, 'SKILL.md');
@@ -144,7 +144,7 @@ export const LAYOUTS: Record<SkillLayoutId, SkillLayoutProfile> = {
     pathRewriteProfile: 'shared-runtime',
     excludedSkills: ['codex'],
     artifactMaterializationStrategy: 'generated',
-    localFirstResolutionPolicy: 'workspace-first',
+    localFirstResolutionPolicy: 'workspace-validated',
     outputPath(root, skillDir) {
       return path.join(root, '.agents', 'skills', codexSkillName(skillDir), 'SKILL.md');
     },
@@ -169,7 +169,7 @@ export const HOSTS: Record<HostId, HostDefinition> = {
     discoverableSkillEntries: ['~/.claude/skills/gstack', '~/.claude/skills/<skill>'],
     runtimeSidecarAssets: [...SHARED_RUNTIME_ASSETS],
     artifactMaterializationStrategy: 'source',
-    localFirstResolutionPolicy: 'workspace-first',
+    localFirstResolutionPolicy: 'workspace-validated',
     capabilities: {
       supportsGeneratedSkills: true,
       supportsGlobalInstall: true,
@@ -198,7 +198,7 @@ export const HOSTS: Record<HostId, HostDefinition> = {
     ],
     runtimeSidecarAssets: [...SHARED_RUNTIME_ASSETS],
     artifactMaterializationStrategy: 'generated',
-    localFirstResolutionPolicy: 'workspace-first',
+    localFirstResolutionPolicy: 'workspace-validated',
     capabilities: {
       supportsGeneratedSkills: true,
       supportsGlobalInstall: true,
@@ -222,7 +222,7 @@ export const HOSTS: Record<HostId, HostDefinition> = {
     discoverableSkillEntries: ['.agents/skills/gstack', '.agents/skills/gstack-*'],
     runtimeSidecarAssets: [...SHARED_RUNTIME_ASSETS],
     artifactMaterializationStrategy: 'generated',
-    localFirstResolutionPolicy: 'workspace-first',
+    localFirstResolutionPolicy: 'workspace-validated',
     capabilities: {
       supportsGeneratedSkills: true,
       supportsGlobalInstall: false,

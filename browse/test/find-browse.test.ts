@@ -3,7 +3,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { locateBinary } from '../src/find-browse';
+import { locateBinary, shouldUseWorkspaceBinary } from '../src/find-browse';
 import { existsSync } from 'fs';
 
 describe('locateBinary', () => {
@@ -22,20 +22,36 @@ describe('locateBinary', () => {
     }
   });
 
-  test('prefers shared runtime before workspace fallback and legacy host markers', () => {
+  test('prefers workspace only when its binary version validates against shared runtime', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../src/find-browse.ts'), 'utf-8');
     expect(src).toContain("join(root, '.gstack', 'browse', 'dist', 'browse')");
     expect(src).toContain("join(home, '.gstack', 'browse', 'dist', 'browse')");
+    expect(src).toContain('function isValidatedWorkspaceBinary(workspace: string, shared: string): boolean');
+    expect(src).toContain("if (!existsSync(shared)) return workspace;");
+    expect(src).toContain("if (isValidatedWorkspaceBinary(workspace, shared)) {");
 
-    const sharedCheck = src.indexOf("if (existsSync(shared)) return shared;");
-    const workspaceCheck = src.indexOf("if (workspace && existsSync(workspace)) return workspace;");
+    const workspaceGate = src.indexOf("if (workspace && existsSync(workspace)) {");
+    const noSharedFallback = src.indexOf("if (!existsSync(shared)) return workspace;");
+    const validationGate = src.indexOf("if (isValidatedWorkspaceBinary(workspace, shared)) {");
+    const sharedFallback = src.indexOf("if (existsSync(shared)) return shared;");
     const legacyLocalCheck = src.indexOf("const local = join(root, m, 'skills', 'gstack', 'browse', 'dist', 'browse');");
 
-    expect(sharedCheck).toBeGreaterThanOrEqual(0);
-    expect(workspaceCheck).toBeGreaterThanOrEqual(0);
+    expect(workspaceGate).toBeGreaterThanOrEqual(0);
+    expect(noSharedFallback).toBeGreaterThanOrEqual(0);
+    expect(validationGate).toBeGreaterThanOrEqual(0);
+    expect(sharedFallback).toBeGreaterThanOrEqual(0);
     expect(legacyLocalCheck).toBeGreaterThanOrEqual(0);
-    expect(sharedCheck).toBeLessThan(workspaceCheck);
-    expect(workspaceCheck).toBeLessThan(legacyLocalCheck);
+    expect(workspaceGate).toBeLessThan(noSharedFallback);
+    expect(noSharedFallback).toBeLessThan(validationGate);
+    expect(validationGate).toBeLessThan(sharedFallback);
+    expect(sharedFallback).toBeLessThan(legacyLocalCheck);
+  });
+
+  test('uses workspace binary only when validation passes', () => {
+    expect(shouldUseWorkspaceBinary('abc123', 'abc123')).toBe(true);
+    expect(shouldUseWorkspaceBinary('abc123', 'def456')).toBe(false);
+    expect(shouldUseWorkspaceBinary(null, 'def456')).toBe(false);
+    expect(shouldUseWorkspaceBinary('abc123', null)).toBe(false);
   });
 
   test('function signature accepts no arguments', () => {

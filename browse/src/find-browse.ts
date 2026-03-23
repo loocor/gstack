@@ -5,8 +5,8 @@
  * Outputs the absolute path to the browse binary on stdout, or exits 1 if not found.
  */
 
-import { existsSync } from 'fs';
-import { join } from 'path';
+import { existsSync, readFileSync } from 'fs';
+import { join, dirname } from 'path';
 import { homedir } from 'os';
 
 // ─── Binary Discovery ───────────────────────────────────────────
@@ -24,6 +24,24 @@ function getGitRoot(): string | null {
   }
 }
 
+function readVersionHash(binaryPath: string): string | null {
+  try {
+    const versionPath = join(dirname(binaryPath), '.version');
+    return readFileSync(versionPath, 'utf-8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export function shouldUseWorkspaceBinary(workspaceVersion: string | null, sharedVersion: string | null): boolean {
+  if (!workspaceVersion || !sharedVersion) return false;
+  return workspaceVersion === sharedVersion;
+}
+
+function isValidatedWorkspaceBinary(workspace: string, shared: string): boolean {
+  return shouldUseWorkspaceBinary(readVersionHash(workspace), readVersionHash(shared));
+}
+
 export function locateBinary(): string | null {
   const root = getGitRoot();
   const home = homedir();
@@ -31,8 +49,14 @@ export function locateBinary(): string | null {
   const shared = join(home, '.gstack', 'browse', 'dist', 'browse');
   const markers = ['.codex', '.agents', '.claude'];
 
+  if (workspace && existsSync(workspace)) {
+    if (!existsSync(shared)) return workspace;
+    if (isValidatedWorkspaceBinary(workspace, shared)) {
+      return workspace;
+    }
+  }
+
   if (existsSync(shared)) return shared;
-  if (workspace && existsSync(workspace)) return workspace;
 
   // Legacy fallback for older installs
   if (root) {
